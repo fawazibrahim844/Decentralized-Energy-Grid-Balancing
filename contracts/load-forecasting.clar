@@ -1,52 +1,48 @@
-;; Load Forecasting Contract
-;; Predicts consumption patterns based on historical data and external factors
+;; Generation Scheduling Contract
+;; Optimizes energy production timing based on forecasts
 
 (define-data-var admin principal tx-sender)
 
-;; Store forecasts by time period (block height ranges)
-(define-map forecasts uint
+;; Store generation schedules by producer and time period
+(define-map schedules { producer: principal, period-id: uint }
   {
+    target-output: uint,
     start-block: uint,
     end-block: uint,
-    predicted-load: uint,
-    confidence: uint, ;; 0-100 percentage
+    priority: uint, ;; 1-10, higher is more important
     created-at: uint
   }
 )
 
-;; Store actual consumption for verification
-(define-map actual-consumption uint
+;; Track actual generation for reconciliation
+(define-map actual-generation { producer: principal, period-id: uint }
   {
-    period-id: uint,
-    actual-load: uint,
+    actual-output: uint,
     recorded-at: uint
   }
 )
 
-(define-data-var forecast-counter uint u0)
-
-(define-read-only (get-forecast (forecast-id uint))
-  (map-get? forecasts forecast-id)
-)
-
-(define-read-only (get-latest-forecast-id)
-  (var-get forecast-counter)
+(define-read-only (get-schedule (producer principal) (period-id uint))
+  (map-get? schedules { producer: producer, period-id: period-id })
 )
 
 ;; Fixed function signature to match expected parameters
-(define-public (submit-forecast (start-block uint) (predicted-load uint))
+(define-public (create-schedule (producer principal) (target-output uint))
   (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u403)) ;; Only admin can submit forecasts
-    (asserts! (< block-height start-block) (err u1)) ;; Start must be in future
+    (asserts! (is-eq tx-sender (var-get admin)) (err u403)) ;; Only admin can create schedules
 
-    (let ((new-id (+ (var-get forecast-counter) u1)))
-      (var-set forecast-counter new-id)
-      (ok (map-set forecasts new-id
+    ;; Default values for period
+    (let (
+      (period-id u1)
+      (start-block (+ block-height u10))
+      (end-block (+ block-height u110))
+    )
+      (ok (map-set schedules { producer: producer, period-id: period-id }
         {
+          target-output: target-output,
           start-block: start-block,
-          end-block: (+ start-block u100), ;; Default end block is start + 100
-          predicted-load: predicted-load,
-          confidence: u80, ;; Default confidence
+          end-block: end-block,
+          priority: u5, ;; Default medium priority
           created-at: block-height
         }
       ))
@@ -54,40 +50,46 @@
   )
 )
 
-(define-public (record-actual-consumption (period-id uint) (actual-load uint))
+(define-public (report-generation (period-id uint) (actual-output uint))
   (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u403)) ;; Only admin can record actual consumption
-    (asserts! (is-some (get-forecast period-id)) (err u4)) ;; Forecast must exist
-
-    (ok (map-set actual-consumption period-id
+    ;; Producer reports their actual generation
+    (ok (map-set actual-generation { producer: tx-sender, period-id: period-id }
       {
-        period-id: period-id,
-        actual-load: actual-load,
+        actual-output: actual-output,
         recorded-at: block-height
       }
     ))
   )
 )
 
-(define-read-only (get-forecast-accuracy (forecast-id uint))
+(define-read-only (get-generation-compliance (producer principal) (period-id uint))
   (let (
-    (forecast (unwrap-panic (get-forecast forecast-id)))
-    (actual (default-to { period-id: u0, actual-load: u0, recorded-at: u0 } (map-get? actual-consumption forecast-id)))
+    (schedule (unwrap-panic (get-schedule producer period-id)))
+    (actual (default-to { actual-output: u0, recorded-at: u0 }
+              (map-get? actual-generation { producer: producer, period-id: period-id })))
   )
-    (if (is-eq (get actual-load actual) u0)
+    (if (is-eq (get actual-output actual) u0)
       ;; No actual data yet
       none
-      ;; Calculate accuracy as percentage (100 - abs difference percentage)
+      ;; Calculate compliance as percentage of target achieved
       (let (
-        (predicted (get predicted-load forecast))
-        (actual-val (get actual-load actual))
-        (diff (if (> predicted actual-val)
-                (- predicted actual-val)
-                (- actual-val predicted)))
-        (diff-percent (/ (* diff u100) actual-val))
+        (target (get target-output schedule))
+        (actual-val (get actual-output actual))
+        (compliance-percent (/ (* actual-val u100) target))
       )
-        (some (- u100 diff-percent))
+        (some compliance-percent)
       )
+    )
+  )
+)
+
+(define-public (adjust-schedule (producer principal) (period-id uint) (new-target-output uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) (err u403)) ;; Only admin can adjust schedules
+    (let ((current-schedule (unwrap! (get-schedule producer period-id) (err u4))))
+      (ok (map-set schedules { producer: producer, period-id: period-id }
+        (merge current-schedule { target-output: new-target-output })
+      ))
     )
   )
 )
